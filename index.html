@@ -1026,23 +1026,26 @@ async function importRecipesFromSheet(){
 }
 
 // ============ SALES PAGE ============
+let editingSaleId = null;
+
 function salesPage(){
   const sorted = STATE.sales.slice().sort((a,b)=> new Date(b.date||0) - new Date(a.date||0));
   const totals = salesTotals();
+  const editingSale = editingSaleId ? STATE.sales.find(s=>s.id===editingSaleId) : null;
   return `
     <div class="page-title"><h1>Log a sale</h1></div>
     <div class="page-sub">Pick the recipe and how many units sold — the suggested price and cost scale to match automatically. Adjust the price if you sold it for something different.</div>
     <div class="card">
-      <h3>New sale</h3>
+      <h3>${editingSale ? 'Edit sale' : 'New sale'}</h3>
       <div class="field-row3">
-        <div class="field"><label>Date</label><input type="date" id="sl-date" value="${new Date().toISOString().slice(0,10)}"></div>
+        <div class="field"><label>Date</label><input type="date" id="sl-date" value="${editingSale ? editingSale.date : new Date().toISOString().slice(0,10)}"></div>
         <div class="field"><label>Recipe / product</label>
           <select id="sl-recipe">
             <option value="">Select a recipe…</option>
-            ${STATE.recipes.slice().sort((a,b)=>a.name.localeCompare(b.name)).map(r=>`<option value="${r.id}">${r.name}</option>`).join('')}
+            ${STATE.recipes.slice().sort((a,b)=>a.name.localeCompare(b.name)).map(r=>`<option value="${r.id}" ${editingSale && editingSale.recipeId===r.id?'selected':''}>${r.name}</option>`).join('')}
           </select>
         </div>
-        <div class="field"><label>Client name (optional)</label><input id="sl-client" placeholder="e.g. Priya"></div>
+        <div class="field"><label>Client name (optional)</label><input id="sl-client" placeholder="e.g. Priya" value="${editingSale ? (editingSale.client||'') : ''}"></div>
       </div>
       <div class="field-row3">
         <div class="field" id="sl-qty-field"><label>Units / portion sold</label>
@@ -1054,17 +1057,24 @@ function salesPage(){
       <div class="page-sub" id="sl-hint" style="margin-top:-6px;margin-bottom:14px;"></div>
       <div class="field-row3">
         <div class="field"><label>Payment method</label>
-          <select id="sl-paymethod"><option>Cash</option><option>UPI</option><option>Bank transfer</option><option>Other</option></select>
+          <select id="sl-paymethod">
+            ${['Cash','UPI','Bank transfer','Other'].map(o=>`<option ${editingSale&&editingSale.payMethod===o?'selected':''}>${o}</option>`).join('')}
+          </select>
         </div>
         <div class="field"><label>Payment status</label>
-          <select id="sl-paystatus"><option>Received</option><option>Pending</option></select>
+          <select id="sl-paystatus">
+            ${['Received','Pending'].map(o=>`<option ${editingSale&&editingSale.payStatus===o?'selected':''}>${o}</option>`).join('')}
+          </select>
         </div>
         <div class="field"><label>Order status</label>
-          <select id="sl-orderstatus"><option>Completed & delivered</option><option>In progress</option><option>Scheduled</option><option>Cancelled</option></select>
+          <select id="sl-orderstatus">
+            ${['Completed & delivered','In progress','Scheduled','Cancelled'].map(o=>`<option ${editingSale&&editingSale.orderStatus===o?'selected':''}>${o}</option>`).join('')}
+          </select>
         </div>
       </div>
       <div class="row" style="justify-content:flex-end;">
-        <button class="btn btn-primary" id="sl-add" ${STATE.recipes.length===0?'disabled title="Add a recipe first"':''}>+ Add sale</button>
+        ${editingSale ? `<button class="btn btn-secondary" id="sl-cancel-edit">Cancel</button>` : ''}
+        <button class="btn btn-primary" id="sl-add" ${STATE.recipes.length===0?'disabled title="Add a recipe first"':''}>${editingSale ? 'Save changes' : '+ Add sale'}</button>
       </div>
       ${STATE.recipes.length===0 ? '<div class="empty">You need at least one saved recipe before you can log a sale — head to Recipes &amp; Pricing first.</div>' : ''}
     </div>
@@ -1091,7 +1101,10 @@ function salesPage(){
               <td class="num">${inr(cost)}</td>
               <td class="num" style="color:${profit>=0?'var(--sage-dark)':'var(--red)'};font-weight:600;">${inr(profit)}</td>
               <td><span class="pill">${s.payStatus||'—'}</span></td>
-              <td><button class="btn-danger btn-sm del-sale" data-id="${s.id}">×</button></td>
+              <td>
+                <button class="btn-ghost btn-sm edit-sale" data-id="${s.id}">Edit</button>
+                <button class="btn-danger btn-sm del-sale" data-id="${s.id}">×</button>
+              </td>
             </tr>`;
           }).join('') || `<tr><td colspan="9" class="empty">No sales logged yet.</td></tr>`}
         </tbody>
@@ -1204,6 +1217,41 @@ function attachSalesHandlers(){
   if(recipeSel) recipeSel.addEventListener('change', renderPortionControl);
   renderPortionControl();
 
+  // If we're editing an existing sale, populate the portion control and price
+  // with that sale's actual values now that the recipe-dependent control exists.
+  const editingSale = editingSaleId ? STATE.sales.find(s=>s.id===editingSaleId) : null;
+  if(editingSale){
+    const presetSel = document.getElementById('sl-portion-preset');
+    const qtyInputNow = document.getElementById('sl-qty');
+    if(presetSel){
+      let matchedValue = 'custom';
+      for(const opt of presetSel.options){
+        if(opt.value!=='' && opt.value!=='custom' && opt.textContent===editingSale.portionLabel){
+          matchedValue = opt.value; break;
+        }
+      }
+      presetSel.value = matchedValue;
+      presetSel.dispatchEvent(new Event('change'));
+      if(matchedValue==='custom'){
+        document.getElementById('sl-qty').value = editingSale.qty;
+      }
+    } else if(qtyInputNow){
+      qtyInputNow.value = editingSale.qty;
+    }
+    recomputeLiveSuggestion();
+    // Show the actual price this sale was logged at, not the freshly recomputed
+    // suggestion — editing shouldn't silently swap in today's suggested price.
+    priceInput.value = editingSale.price;
+  }
+
+  const cancelBtn = document.getElementById('sl-cancel-edit');
+  if(cancelBtn) cancelBtn.addEventListener('click', ()=>{ editingSaleId = null; render(); });
+
+  document.querySelectorAll('.edit-sale').forEach(b=>b.addEventListener('click', ()=>{
+    editingSaleId = b.dataset.id;
+    render();
+  }));
+
   const addBtn = document.getElementById('sl-add');
   if(addBtn) addBtn.addEventListener('click', async ()=>{
     const rec = STATE.recipes.find(r=>r.id===recipeSel.value);
@@ -1218,8 +1266,7 @@ function attachSalesHandlers(){
       const opt = presetSel.options[presetSel.selectedIndex];
       portionLabel = opt.textContent;
     }
-    const sale = {
-      id: uid('s'),
+    const saleFields = {
       date: document.getElementById('sl-date').value,
       recipeId: rec.id,
       recipeName: rec.name,
@@ -1234,7 +1281,13 @@ function attachSalesHandlers(){
       payStatus: document.getElementById('sl-paystatus').value,
       orderStatus: document.getElementById('sl-orderstatus').value,
     };
-    STATE.sales.push(sale);
+    if(editingSaleId){
+      const idx = STATE.sales.findIndex(s=>s.id===editingSaleId);
+      if(idx>-1) STATE.sales[idx] = { ...STATE.sales[idx], ...saleFields };
+      editingSaleId = null;
+    } else {
+      STATE.sales.push({ id: uid('s'), ...saleFields });
+    }
     await saveKey('sales', STATE.sales);
     render();
   });
