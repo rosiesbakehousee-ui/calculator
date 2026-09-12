@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <title>Rosie's Bakehouse — Cost & Sales Calculator</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;1,9..144,500&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
   :root{
@@ -221,15 +222,22 @@ async function cloudPushBundle(cfg, bundle){
 }
 
 let cloudBundle = null; // in-memory cache of the whole synced record, once fetched
+let cloudBundlePromise = null; // in-flight fetch, shared so concurrent calls don't each trigger their own request
+function getCloudBundle(){
+  if(cloudBundlePromise===null){
+    cloudBundlePromise = cloudFetchBundle(cloudConfig).then(b=>{ cloudBundle=b; return b; });
+  }
+  return cloudBundlePromise;
+}
 const cloudBackend = {
   async get(key){
-    if(cloudBundle===null) cloudBundle = await cloudFetchBundle(cloudConfig);
-    return (key in cloudBundle) ? { key, value: JSON.stringify(cloudBundle[key]) } : null;
+    const bundle = await getCloudBundle();
+    return (key in bundle) ? { key, value: JSON.stringify(bundle[key]) } : null;
   },
   async set(key, valueStr){
-    if(cloudBundle===null) cloudBundle = await cloudFetchBundle(cloudConfig);
-    cloudBundle[key] = JSON.parse(valueStr);
-    await cloudPushBundle(cloudConfig, cloudBundle);
+    const bundle = await getCloudBundle();
+    bundle[key] = JSON.parse(valueStr);
+    await cloudPushBundle(cloudConfig, bundle);
     return { key, value: valueStr };
   }
 };
@@ -1543,7 +1551,4 @@ async function analyzeRecipePhoto(fileData){
   const ingredientNames = STATE.materials.map(m=>m.name);
   const prompt = `You are reading a photo of a home baker's recipe (a recipe card, printout, or handwritten note).
 Extract the recipe as JSON only — no markdown fences, no commentary, just a JSON object with this exact shape:
-{"name": "recipe name as best you can tell", "ingredients": [{"ingredient": "ingredient name as written in the photo", "qty": number, "unit": "gram|mililitre|piece"}]}
-
-Rules:
-- Convert every quantity to grams for solids, millilitres for liquids, or a whole-number count for discrete items (eggs, bananas, lemons) — do not use cups, tablespoons, or teaspoons in the output; convert them to grams/millilitres using standard
+{"name": "recipe name as best you can tell", "ingredients": [{"ingredient": "ingredient name as written in the photo", "qty": number, "unit
