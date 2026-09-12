@@ -69,6 +69,7 @@
   td{padding:8px 10px;border-bottom:1px solid #F0E7D8;}
   tr:last-child td{border-bottom:none;}
   tr.total-row td{font-weight:700;border-top:2px solid var(--espresso);border-bottom:none;padding-top:12px;}
+  tr.year-row td{background:var(--cream-2);font-family:'Fraunces',serif;font-weight:600;font-size:14px;color:var(--terracotta-dark);padding:8px 10px;border-bottom:1px solid var(--line);}
   .num{text-align:right;font-variant-numeric:tabular-nums;}
 
   input,select{
@@ -1074,6 +1075,50 @@ async function importRecipesFromSheet(){
 // ============ SALES PAGE ============
 let editingSaleId = null;
 
+function formatDDMM(dateStr){
+  if(!dateStr) return '—';
+  const d = new Date(dateStr+'T00:00:00');
+  if(isNaN(d)) return dateStr;
+  const dd = String(d.getDate()).padStart(2,'0');
+  const mm = String(d.getMonth()+1).padStart(2,'0');
+  return `${dd}-${mm}`;
+}
+
+// Builds the sales log's table rows with a year divider inserted whenever the
+// year changes, so the year is shown once per group instead of on every row —
+// dates within a group just show as dd-mm.
+function salesTableRowsHtml(sorted){
+  let html = '';
+  let lastYear = null;
+  sorted.forEach(s=>{
+    const year = s.date ? s.date.slice(0,4) : null;
+    if(year !== lastYear){
+      lastYear = year;
+      html += `<tr class="year-row"><td colspan="9">${year || 'Undated'}</td></tr>`;
+    }
+    const revenue = saleRevenue(s), cost = saleCost(s), profit = revenue-cost;
+    const referencePrice = saleReferencePrice(s);
+    // A sale within ₹1 of the suggested price is just rounding to a whole
+    // rupee, not a real discount — only flag when the gap is a full rupee or more.
+    const isDiscounted = referencePrice!==undefined && (referencePrice - revenue) >= 1;
+    html += `<tr data-id="${s.id}" ${isDiscounted?'class="discount-row"':''}>
+      <td>${formatDDMM(s.date)}</td>
+      <td>${s.recipeName}</td>
+      <td>${s.client||'—'}</td>
+      <td class="num">${saleQuantityLabel(s)}</td>
+      <td class="num">${inr(revenue)} ${isDiscounted?'<span class="pill-discount" title="Below the suggested price of '+inr(referencePrice)+' for '+saleQuantityLabel(s)+'">Discounted</span>':''}</td>
+      <td class="num">${inr(cost)}</td>
+      <td class="num" style="color:${profit>=0?'var(--sage-dark)':'var(--red)'};font-weight:600;">${inr(profit)}</td>
+      <td><span class="pill">${s.payStatus||'—'}</span></td>
+      <td>
+        <button class="btn-ghost btn-sm edit-sale" data-id="${s.id}">Edit</button>
+        <button class="btn-danger btn-sm del-sale" data-id="${s.id}">×</button>
+      </td>
+    </tr>`;
+  });
+  return html || `<tr><td colspan="9" class="empty">No sales logged yet.</td></tr>`;
+}
+
 function salesPage(){
   const sorted = STATE.sales.slice().sort((a,b)=> new Date(b.date||0) - new Date(a.date||0));
   const totals = salesTotals();
@@ -1136,27 +1181,7 @@ function salesPage(){
           <th>Payment</th><th></th>
         </tr></thead>
         <tbody>
-          ${sorted.map(s=>{
-            const revenue = saleRevenue(s), cost = saleCost(s), profit = revenue-cost;
-            const referencePrice = saleReferencePrice(s);
-            // A sale within ₹1 of the suggested price is just rounding to a whole
-            // rupee, not a real discount — only flag when the gap is a full rupee or more.
-            const isDiscounted = referencePrice!==undefined && (referencePrice - revenue) >= 1;
-            return `<tr data-id="${s.id}" ${isDiscounted?'class="discount-row"':''}>
-              <td>${s.date||'—'}</td>
-              <td>${s.recipeName}</td>
-              <td>${s.client||'—'}</td>
-              <td class="num">${saleQuantityLabel(s)}</td>
-              <td class="num">${inr(revenue)} ${isDiscounted?'<span class="pill-discount" title="Below the suggested price of '+inr(referencePrice)+' for '+saleQuantityLabel(s)+'">Discounted</span>':''}</td>
-              <td class="num">${inr(cost)}</td>
-              <td class="num" style="color:${profit>=0?'var(--sage-dark)':'var(--red)'};font-weight:600;">${inr(profit)}</td>
-              <td><span class="pill">${s.payStatus||'—'}</span></td>
-              <td>
-                <button class="btn-ghost btn-sm edit-sale" data-id="${s.id}">Edit</button>
-                <button class="btn-danger btn-sm del-sale" data-id="${s.id}">×</button>
-              </td>
-            </tr>`;
-          }).join('') || `<tr><td colspan="9" class="empty">No sales logged yet.</td></tr>`}
+          ${salesTableRowsHtml(sorted)}
         </tbody>
         ${sorted.length>0 ? `<tfoot><tr class="total-row">
           <td colspan="4">TOTALS</td>
@@ -1231,8 +1256,19 @@ function attachSalesHandlers(){
   function renderPortionControl(){
     toggleCustomNameField();
     if(isCustomMode()){
-      qtyControl.innerHTML = `<input type="number" step="any" id="sl-qty" placeholder="e.g. 1" value="1">`;
+      qtyControl.innerHTML = `
+        <div class="qty-with-unit">
+          <input type="number" step="any" id="sl-qty" placeholder="e.g. 1" value="1">
+        </div>
+        <select id="sl-custom-unit" style="margin-top:8px;">
+          <option value="kg">kg</option>
+          <option value="g">grams</option>
+          <option value="ml">ml</option>
+          <option value="piece">pieces</option>
+        </select>
+      `;
       document.getElementById('sl-qty').addEventListener('input', recomputeLiveSuggestion);
+      document.getElementById('sl-custom-unit').addEventListener('change', recomputeLiveSuggestion);
       costInput.disabled = false;
       costLabel.textContent = 'Estimated cost for this sale (₹)';
       costInput.placeholder = 'Enter your estimate';
@@ -1386,6 +1422,13 @@ function attachSalesHandlers(){
     recipeSel.value = '__custom__';
     renderPortionControl();
     document.getElementById('sl-qty').value = editingSale.qty;
+    const unitSel = document.getElementById('sl-custom-unit');
+    if(unitSel && editingSale.portionLabel){
+      const parts = editingSale.portionLabel.split(' ');
+      const storedUnit = parts[1];
+      const match = storedUnit==='piece'||storedUnit==='pieces' ? 'piece' : storedUnit;
+      if([...unitSel.options].some(o=>o.value===match)) unitSel.value = match;
+    }
     costInput.value = editingSale.cost;
     priceInput.value = editingSale.price;
   } else if(editingSale){
@@ -1440,13 +1483,15 @@ function attachSalesHandlers(){
       const customName = customNameInput.value.trim();
       if(!customName){ await modalAlert('Give the custom item a name.'); return; }
       const cost = parseFloat(costInput.value)||0;
+      const unit = document.getElementById('sl-custom-unit').value;
+      const unitWord = unit==='piece' ? (qty===1?'piece':'pieces') : unit;
       saleFields = {
         date: document.getElementById('sl-date').value,
         recipeId: null,
         recipeName: customName,
         client: document.getElementById('sl-client').value.trim(),
         qty,
-        portionLabel: null,
+        portionLabel: `${qty} ${unitWord}`,
         price,
         cost,                          // entered manually — nothing calculated for custom items
         totalsPreComputed: true,
