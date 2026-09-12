@@ -491,42 +491,14 @@ function salesTotals(){
   return {revenue, cost, profit, marginPct};
 }
 
-// Converts a sale's qty ratio into a real amount (grams/ml/pieces) using its
-// recipe's batch size, for aggregating "units sold" without falling back to a
-// bare fraction — mirrors saleQuantityLabel's conversion but returns a number.
-function saleAmountForAggregation(s){
-  const rec = STATE.recipes.find(r=>r.id===s.recipeId);
-  if(rec && rec.yieldQty && rec.yieldUnit){
-    if(rec.yieldUnit==='kg') return { amount: (s.qty||0)*rec.yieldQty*1000, unit:'g' };
-    return { amount: (s.qty||0)*rec.yieldQty, unit: rec.yieldUnit };
-  }
-  return null;
-}
-function formatAggregatedAmount(group){
-  if(group.unit && !group.mixedOrUnknown){
-    const rounded = Math.round(group.amount);
-    if(group.unit==='piece') return `${rounded} ${rounded===1?'piece':'pieces'}`;
-    if(group.unit==='ml') return `${rounded} ml`;
-    return `${rounded} g`;
-  }
-  return `${Math.round(group.qty*100)/100} unit(s)`;
-}
-
 function perProductSummary(){
   const map = {};
   STATE.sales.forEach(s=>{
-    if(!map[s.recipeName]) map[s.recipeName] = {name:s.recipeName, qty:0, revenue:0, cost:0, amount:0, unit:null, mixedOrUnknown:false};
+    if(!map[s.recipeName]) map[s.recipeName] = {name:s.recipeName, count:0, revenue:0, cost:0};
     const g = map[s.recipeName];
-    g.qty += s.qty||0;
+    g.count += 1;
     g.revenue += saleRevenue(s);
     g.cost += saleCost(s);
-    const conv = saleAmountForAggregation(s);
-    if(conv && (g.unit===null || g.unit===conv.unit)){
-      g.unit = conv.unit;
-      g.amount += conv.amount;
-    } else {
-      g.mixedOrUnknown = true;
-    }
   });
   return Object.values(map).map(r=>({...r, profit:r.revenue-r.cost}))
     .sort((a,b)=>b.revenue-a.revenue);
@@ -1714,10 +1686,10 @@ function overviewPage(){
       <h3>Sales performance by product</h3>
       ${perProduct.length===0 ? '<div class="empty">Log a sale to see performance by product.</div>' : `
       <table>
-        <thead><tr><th>Product</th><th class="num">Units sold</th><th class="num">Revenue</th><th class="num">Cost</th><th class="num">Profit</th></tr></thead>
+        <thead><tr><th>Product</th><th class="num">Times sold</th><th class="num">Revenue</th><th class="num">Cost</th><th class="num">Profit</th></tr></thead>
         <tbody>
           ${perProduct.map(p=>`<tr>
-            <td>${p.name}</td><td class="num">${formatAggregatedAmount(p)}</td><td class="num">${inr(p.revenue)}</td>
+            <td>${p.name}</td><td class="num">${p.count}</td><td class="num">${inr(p.revenue)}</td>
             <td class="num">${inr(p.cost)}</td>
             <td class="num" style="color:${p.profit>=0?'var(--sage-dark)':'var(--red)'};font-weight:600;">${inr(p.profit)}</td>
           </tr>`).join('')}
