@@ -460,6 +460,25 @@ function saleReferencePrice(s){
   return rec ? computeRecipeCost(rec).suggestedPrice * (s.qty||0) : undefined;
 }
 
+// A human-readable amount for the "Units" column — "500 g" for a standard size,
+// or a reconstructed "437 g" / "150 ml" / "3 pieces" for a custom amount, so the
+// log never shows a bare fraction like 0.4. Only falls back to a raw ratio when
+// the sale's recipe has no batch size on record at all to convert against.
+function saleQuantityLabel(s){
+  if(s.portionLabel) return s.portionLabel;
+  const rec = STATE.recipes.find(r=>r.id===s.recipeId);
+  if(rec && rec.yieldQty && rec.yieldUnit){
+    let amount;
+    if(rec.yieldUnit==='kg') amount = (s.qty||0) * rec.yieldQty * 1000; // display weight custom amounts in grams
+    else amount = (s.qty||0) * rec.yieldQty;
+    const rounded = Math.round(amount);
+    if(rec.yieldUnit==='piece') return `${rounded} ${rounded===1?'piece':'pieces'}`;
+    if(rec.yieldUnit==='ml') return `${rounded} ml`;
+    return `${rounded} g`;
+  }
+  return `${s.qty}× batch`;
+}
+
 function salesTotals(){
   let revenue=0, cost=0;
   STATE.sales.forEach(s=>{
@@ -1096,8 +1115,8 @@ function salesPage(){
               <td>${s.date||'—'}</td>
               <td>${s.recipeName}</td>
               <td>${s.client||'—'}</td>
-              <td class="num">${s.portionLabel || s.qty}</td>
-              <td class="num">${inr(revenue)} ${isDiscounted?'<span class="pill-discount" title="Below the suggested price of '+inr(referencePrice)+' for '+(s.portionLabel||s.qty+' unit(s)')+'">Discounted</span>':''}</td>
+              <td class="num">${saleQuantityLabel(s)}</td>
+              <td class="num">${inr(revenue)} ${isDiscounted?'<span class="pill-discount" title="Below the suggested price of '+inr(referencePrice)+' for '+saleQuantityLabel(s)+'">Discounted</span>':''}</td>
               <td class="num">${inr(cost)}</td>
               <td class="num" style="color:${profit>=0?'var(--sage-dark)':'var(--red)'};font-weight:600;">${inr(profit)}</td>
               <td><span class="pill">${s.payStatus||'—'}</span></td>
