@@ -421,24 +421,31 @@ function computeRecipeCost(recipe){
     if(m) ingCost += (line.qty||0) * m.unitCost;
   });
   let otherCost = 0;
+  let scalableOtherCost = 0; // the subset of other costs marked to scale with quantity sold (e.g. hand-assembly labour)
   (recipe.otherCosts||[]).forEach(line=>{
     const rate = getRate(line.type);
-    otherCost += (line.qty||0) * rate;
+    const lineCost = (line.qty||0) * rate;
+    otherCost += lineCost;
+    if(line.scales) scalableOtherCost += lineCost;
   });
   const totalCost = ingCost + otherCost;
   const margin = recipe.margin ?? STATE.settings.defaultMargin;
   const suggestedPrice = margin >= 100 ? totalCost*2 : totalCost / (1 - margin/100);
-  return { ingCost, otherCost, totalCost, suggestedPrice, margin };
+  return { ingCost, otherCost, scalableOtherCost, totalCost, suggestedPrice, margin };
 }
 
 // For a sale covering only part of a recipe's batch (e.g. selling 500g out of a
-// 1kg batch), only the ingredient cost should scale down with the portion sold —
-// electricity, manpower, packaging, and parchment were spent producing the whole
-// batch regardless of how much of it any single sale covers, so they're counted
-// at their full recipe value on every sale, not shrunk proportionally.
+// 1kg batch): ingredient cost always scales with the portion sold. Other costs
+// (electricity, packaging, parchment) stay at their full recipe value, since
+// that was spent producing the whole batch regardless of how much of it this
+// sale covers — UNLESS a line has been marked "scales with quantity sold" (for
+// things like hand-assembly labour on Pinnis, laddoos, etc., where a smaller
+// batch genuinely takes proportionally less time), in which case that line
+// scales down along with the ingredients.
 function saleCostAndSuggested(recipe, qty){
   const c = computeRecipeCost(recipe);
-  const cost = round2(c.ingCost * qty + c.otherCost);
+  const fixedOtherCost = c.otherCost - c.scalableOtherCost;
+  const cost = round2(c.ingCost * qty + c.scalableOtherCost * qty + fixedOtherCost);
   const suggested = c.margin >= 100 ? cost*2 : cost / (1 - c.margin/100);
   return { cost, suggested: round2(suggested) };
 }
@@ -837,13 +844,19 @@ function otherCostLineHTML(line, i){
   const rate = getRate(line.type);
   const cost = (line.qty||0)*rate;
   return `
-    <div class="ingredient-line" data-i="${i}">
-      <select class="ro-type" data-i="${i}">
-        ${OTHER_COST_DEFS.map(d=>`<option value="${d.key}" ${d.key===line.type?'selected':''}>${d.label} (${inr(getRate(d.key))}/${d.unit})</option>`).join('')}
-      </select>
-      <input type="number" step="any" class="ro-qty" data-i="${i}" placeholder="${def.unit}(s)" value="${line.qty||''}">
-      <div class="cost">${inr(cost)}</div>
-      <button class="btn-danger ro-remove" data-i="${i}" title="Remove">×</button>
+    <div>
+      <div class="ingredient-line" data-i="${i}">
+        <select class="ro-type" data-i="${i}">
+          ${OTHER_COST_DEFS.map(d=>`<option value="${d.key}" ${d.key===line.type?'selected':''}>${d.label} (${inr(getRate(d.key))}/${d.unit})</option>`).join('')}
+        </select>
+        <input type="number" step="any" class="ro-qty" data-i="${i}" placeholder="${def.unit}(s)" value="${line.qty||''}">
+        <div class="cost">${inr(cost)}</div>
+        <button class="btn-danger ro-remove" data-i="${i}" title="Remove">×</button>
+      </div>
+      <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--espresso-soft);margin:-4px 0 12px;cursor:pointer;">
+        <input type="checkbox" class="ro-scales" data-i="${i}" ${line.scales?'checked':''}>
+        Scales down with the quantity sold (for hand-assembled items where a smaller batch takes less time)
+      </label>
     </div>
   `;
 }
@@ -890,7 +903,8 @@ function readRecipeFromForm(){
   });
   const otherCosts = [...document.querySelectorAll('.ro-type')].map((sel)=>{
     const qtyInput = document.querySelector(`.ro-qty[data-i="${sel.dataset.i}"]`);
-    return { type: sel.value, qty: parseFloat(qtyInput.value)||0 };
+    const scalesInput = document.querySelector(`.ro-scales[data-i="${sel.dataset.i}"]`);
+    return { type: sel.value, qty: parseFloat(qtyInput.value)||0, scales: scalesInput ? scalesInput.checked : false };
   });
   const margin = parseFloat(document.getElementById('rc-margin').value) || 0;
   const name = document.getElementById('rc-name').value.trim();
@@ -983,6 +997,9 @@ function attachRecipeEditorHandlers(){
       line.querySelector('.cost').textContent = inr(qty*rate);
       refreshSummary();
     });
+  });
+  document.querySelectorAll('.ro-scales').forEach(el=>{
+    el.addEventListener('change', refreshSummary);
   });
   const marginInput = document.getElementById('rc-margin');
   if(marginInput) marginInput.addEventListener('input', refreshSummary);
