@@ -320,8 +320,11 @@ function modalAlert(message){
 
 // ---------- Default settings ----------
 const DEFAULT_SETTINGS = {
+  electricity: {
+    wattage: 1400,     // watts drawn by the oven/appliance
+    costPerKwh: 93     // ₹ per kWh from your electricity bill
+  },
   rates: {
-    electricity: 93,      // per hour
     manpower: 300,        // per hour
     packaging: 50,        // per piece
     parchment: 10,        // per piece
@@ -336,6 +339,17 @@ const OTHER_COST_DEFS = [
   { key:'parchment',   label:'Parchment paper', unit:'piece' },
   { key:'transport',   label:'Transportation', unit:'km' },
 ];
+// Electricity cost per hour used is derived from wattage and the per-kWh rate,
+// not stored directly: (watts / 1000) x hours x cost-per-kWh = cost for that
+// many hours. Every other "other cost" is still just a flat rate per unit.
+function getRate(type){
+  if(type==='electricity'){
+    const e = STATE.settings.electricity || DEFAULT_SETTINGS.electricity;
+    return (e.wattage/1000) * e.costPerKwh;
+  }
+  return STATE.settings.rates[type] ?? 0;
+}
+
 // Standard batch sizes to keep sizing consistent across the menu. "Custom" falls
 // back to a free qty+unit entry for anything that doesn't fit one of these.
 const STANDARD_YIELDS = [
@@ -407,13 +421,25 @@ function computeRecipeCost(recipe){
   });
   let otherCost = 0;
   (recipe.otherCosts||[]).forEach(line=>{
-    const rate = STATE.settings.rates[line.type] ?? 0;
+    const rate = getRate(line.type);
     otherCost += (line.qty||0) * rate;
   });
   const totalCost = ingCost + otherCost;
   const margin = recipe.margin ?? STATE.settings.defaultMargin;
   const suggestedPrice = margin >= 100 ? totalCost*2 : totalCost / (1 - margin/100);
   return { ingCost, otherCost, totalCost, suggestedPrice, margin };
+}
+
+// For a sale covering only part of a recipe's batch (e.g. selling 500g out of a
+// 1kg batch), only the ingredient cost should scale down with the portion sold —
+// electricity, manpower, packaging, and parchment were spent producing the whole
+// batch regardless of how much of it any single sale covers, so they're counted
+// at their full recipe value on every sale, not shrunk proportionally.
+function saleCostAndSuggested(recipe, qty){
+  const c = computeRecipeCost(recipe);
+  const cost = round2(c.ingCost * qty + c.otherCost);
+  const suggested = c.margin >= 100 ? cost*2 : cost / (1 - c.margin/100);
+  return { cost, suggested: round2(suggested) };
 }
 
 // A sale logged with the current form stores the actual total price/cost for
@@ -787,12 +813,12 @@ function ingredientLineHTML(line, i){
 }
 function otherCostLineHTML(line, i){
   const def = OTHER_COST_DEFS.find(d=>d.key===line.type) || OTHER_COST_DEFS[0];
-  const rate = STATE.settings.rates[line.type] ?? 0;
+  const rate = getRate(line.type);
   const cost = (line.qty||0)*rate;
   return `
     <div class="ingredient-line" data-i="${i}">
       <select class="ro-type" data-i="${i}">
-        ${OTHER_COST_DEFS.map(d=>`<option value="${d.key}" ${d.key===line.type?'selected':''}>${d.label} (${inr(STATE.settings.rates[d.key])}/${d.unit})</option>`).join('')}
+        ${OTHER_COST_DEFS.map(d=>`<option value="${d.key}" ${d.key===line.type?'selected':''}>${d.label} (${inr(getRate(d.key))}/${d.unit})</option>`).join('')}
       </select>
       <input type="number" step="any" class="ro-qty" data-i="${i}" placeholder="${def.unit}(s)" value="${line.qty||''}">
       <div class="cost">${inr(cost)}</div>
@@ -923,7 +949,7 @@ function attachRecipeEditorHandlers(){
     el.addEventListener('change', ()=>{
       const line = el.closest('.ingredient-line');
       const qtyInput = line.querySelector('.ro-qty');
-      const rate = STATE.settings.rates[el.value] ?? 0;
+      const rate = getRate(el.value);
       const qty = parseFloat(qtyInput.value)||0;
       line.querySelector('.cost').textContent = inr(qty*rate);
       refreshSummary();
@@ -933,7 +959,7 @@ function attachRecipeEditorHandlers(){
     el.addEventListener('input', ()=>{
       const line = el.closest('.ingredient-line');
       const typeSel = line.querySelector('.ro-type');
-      const rate = STATE.settings.rates[typeSel.value] ?? 0;
+      const rate = getRate(typeSel.value);
       const qty = parseFloat(el.value)||0;
       line.querySelector('.cost').textContent = inr(qty*rate);
       refreshSummary();
@@ -1019,7 +1045,9 @@ function salesPage(){
         <div class="field"><label>Client name (optional)</label><input id="sl-client" placeholder="e.g. Priya"></div>
       </div>
       <div class="field-row3">
-        <div class="field"><label>Units / portion sold</label><input type="number" step="any" id="sl-qty" placeholder="e.g. 1 or 0.5" value="1"></div>
+        <div class="field" id="sl-qty-field"><label>Units / portion sold</label>
+          <div id="sl-qty-control"><input type="number" step="any" id="sl-qty" placeholder="e.g. 1 or 0.5" value="1"></div>
+        </div>
         <div class="field"><label>Selling price for this sale (₹)</label><input type="number" step="any" id="sl-price"></div>
         <div class="field"><label>Cost for this sale (₹, auto)</label><input id="sl-cost" disabled></div>
       </div>
@@ -1058,8 +1086,8 @@ function salesPage(){
               <td>${s.date||'—'}</td>
               <td>${s.recipeName}</td>
               <td>${s.client||'—'}</td>
-              <td class="num">${s.qty}</td>
-              <td class="num">${inr(revenue)} ${isDiscounted?'<span class="pill-discount" title="Below the suggested price of '+inr(referencePrice)+' for '+s.qty+' unit(s)">Discounted</span>':''}</td>
+              <td class="num">${s.portionLabel || s.qty}</td>
+              <td class="num">${inr(revenue)} ${isDiscounted?'<span class="pill-discount" title="Below the suggested price of '+inr(referencePrice)+' for '+(s.portionLabel||s.qty+' unit(s)')+'">Discounted</span>':''}</td>
               <td class="num">${inr(cost)}</td>
               <td class="num" style="color:${profit>=0?'var(--sage-dark)':'var(--red)'};font-weight:600;">${inr(profit)}</td>
               <td><span class="pill">${s.payStatus||'—'}</span></td>
@@ -1081,10 +1109,70 @@ function salesPage(){
 
 function attachSalesHandlers(){
   const recipeSel = document.getElementById('sl-recipe');
-  const qtyInput = document.getElementById('sl-qty');
   const priceInput = document.getElementById('sl-price');
   const costInput = document.getElementById('sl-cost');
   const hint = document.getElementById('sl-hint');
+  const qtyControl = document.getElementById('sl-qty-control');
+
+  function toGrams(qty, unit){ return unit==='kg' ? qty*1000 : qty; }
+
+  // Which standardized portion sizes make sense for this recipe's own unit family.
+  // Weight-based recipes (g/kg) get weight presets; piece-based get piece presets;
+  // anything else (ml, or no batch size set at all) falls back to free entry.
+  function portionOptionsForRecipe(rec){
+    if(!rec || !rec.yieldQty || !rec.yieldUnit) return null;
+    if(rec.yieldUnit==='g' || rec.yieldUnit==='kg') return STANDARD_YIELDS.filter(p=>p.unit==='g'||p.unit==='kg');
+    if(rec.yieldUnit==='piece') return STANDARD_YIELDS.filter(p=>p.unit==='piece');
+    return null;
+  }
+
+  function qtyRatioFromPortion(rec, presetQty, presetUnit){
+    if(rec.yieldUnit==='piece') return presetQty / rec.yieldQty;
+    return toGrams(presetQty, presetUnit) / toGrams(rec.yieldQty, rec.yieldUnit);
+  }
+
+  // Rebuilds the "units / portion sold" control to match whichever recipe is picked:
+  // a dropdown of standard sizes when the recipe has a batch size set, a free number
+  // otherwise. Always leaves a #sl-qty input somewhere in the DOM (hidden when a
+  // preset is active) so the rest of the form can keep reading it the same way.
+  function renderPortionControl(){
+    const rec = STATE.recipes.find(r=>r.id===recipeSel.value);
+    const options = portionOptionsForRecipe(rec);
+    if(!options){
+      qtyControl.innerHTML = `<input type="number" step="any" id="sl-qty" placeholder="e.g. 1 or 0.5" value="1">`;
+      document.getElementById('sl-qty').addEventListener('input', recomputeLiveSuggestion);
+      recomputeLiveSuggestion();
+      return;
+    }
+    qtyControl.innerHTML = `
+      <select id="sl-portion-preset">
+        <option value="">Select a size…</option>
+        ${options.map(p=>`<option value="${p.qty}|${p.unit}">${p.label}</option>`).join('')}
+        <option value="custom">Custom…</option>
+      </select>
+      <div id="sl-qty-custom-row" style="display:none;margin-top:8px;">
+        <input type="number" step="any" id="sl-qty" placeholder="fraction of the whole batch, e.g. 0.5" value="1">
+      </div>
+    `;
+    const presetSel = document.getElementById('sl-portion-preset');
+    const customRow = document.getElementById('sl-qty-custom-row');
+    const qtyInput = document.getElementById('sl-qty');
+    presetSel.addEventListener('change', ()=>{
+      if(presetSel.value==='custom'){
+        customRow.style.display = 'block';
+      } else if(presetSel.value===''){
+        customRow.style.display = 'none';
+        qtyInput.value = '';
+      } else {
+        customRow.style.display = 'none';
+        const [pq, pu] = presetSel.value.split('|');
+        qtyInput.value = Math.round(qtyRatioFromPortion(rec, parseFloat(pq), pu)*10000)/10000;
+      }
+      recomputeLiveSuggestion();
+    });
+    qtyInput.addEventListener('input', recomputeLiveSuggestion);
+    recomputeLiveSuggestion();
+  }
 
   // Recompute the live suggestion whenever the recipe or the quantity changes.
   // The suggested price only overwrites what's in the price box if the box still
@@ -1092,32 +1180,44 @@ function attachSalesHandlers(){
   // left alone even if you then tweak the quantity, so your actual price sticks.
   function recomputeLiveSuggestion(){
     const rec = STATE.recipes.find(r=>r.id===recipeSel.value);
+    const qtyInput = document.getElementById('sl-qty');
     const qty = parseFloat(qtyInput.value)||0;
     if(!rec){
       costInput.value=''; priceInput.value=''; priceInput.dataset.suggested='';
       hint.textContent = '';
       return;
     }
-    const c = computeRecipeCost(rec);
-    const suggestedTotal = round2(c.suggestedPrice * qty);
-    const costTotal = round2(c.totalCost * qty);
+    const sc = saleCostAndSuggested(rec, qty);
+    const suggestedTotal = sc.suggested;
+    const costTotal = sc.cost;
     const priceUntouched = priceInput.value==='' || parseFloat(priceInput.value)===parseFloat(priceInput.dataset.suggested||'NaN');
     if(priceUntouched) priceInput.value = suggestedTotal;
     priceInput.dataset.suggested = suggestedTotal;
     costInput.value = inr(costTotal);
-    hint.textContent = `For ${qty} unit(s): suggested price ${inr(suggestedTotal)}, cost ${inr(costTotal)}. Change the price above if you sold it for something different.`;
+    const presetSel = document.getElementById('sl-portion-preset');
+    const sizeDescription = (presetSel && presetSel.value && presetSel.value!=='custom')
+      ? presetSel.options[presetSel.selectedIndex].textContent
+      : `${qty} unit(s)`;
+    hint.textContent = `For ${sizeDescription}: suggested price ${inr(suggestedTotal)}, cost ${inr(costTotal)}. Change the price above if you sold it for something different.`;
   }
 
-  if(recipeSel) recipeSel.addEventListener('change', recomputeLiveSuggestion);
-  if(qtyInput) qtyInput.addEventListener('input', recomputeLiveSuggestion);
+  if(recipeSel) recipeSel.addEventListener('change', renderPortionControl);
+  renderPortionControl();
 
   const addBtn = document.getElementById('sl-add');
   if(addBtn) addBtn.addEventListener('click', async ()=>{
     const rec = STATE.recipes.find(r=>r.id===recipeSel.value);
     if(!rec){ await modalAlert('Choose a recipe.'); return; }
+    const qtyInput = document.getElementById('sl-qty');
     const qty = parseFloat(qtyInput.value)||0;
     const price = parseFloat(priceInput.value)||0;
-    const c = computeRecipeCost(rec);
+    const sc = saleCostAndSuggested(rec, qty);
+    const presetSel = document.getElementById('sl-portion-preset');
+    let portionLabel = null;
+    if(presetSel && presetSel.value && presetSel.value!=='custom'){
+      const opt = presetSel.options[presetSel.selectedIndex];
+      portionLabel = opt.textContent;
+    }
     const sale = {
       id: uid('s'),
       date: document.getElementById('sl-date').value,
@@ -1125,9 +1225,10 @@ function attachSalesHandlers(){
       recipeName: rec.name,
       client: document.getElementById('sl-client').value.trim(),
       qty,
-      price,                                      // total price actually charged for this sale
-      cost: round2(c.totalCost * qty),             // total cost for this sale, always automatic
-      suggestedPriceAtSale: round2(c.suggestedPrice * qty),
+      portionLabel,
+      price,                          // total price actually charged for this sale
+      cost: sc.cost,                  // ingredient cost scaled by qty + full other-costs, always automatic
+      suggestedPriceAtSale: sc.suggested,
       totalsPreComputed: true,
       payMethod: document.getElementById('sl-paymethod').value,
       payStatus: document.getElementById('sl-paystatus').value,
@@ -1354,13 +1455,27 @@ function overviewPage(){
 // ============ SETTINGS PAGE ============
 function settingsPage(){
   const s = STATE.settings;
+  const elec = s.electricity || DEFAULT_SETTINGS.electricity;
+  const nonElectricityDefs = OTHER_COST_DEFS.filter(d=>d.key!=='electricity');
   return `
     <div class="page-title"><h1>Rates &amp; settings</h1></div>
     <div class="page-sub">These per-hour / per-piece rates are what "other costs" in your recipes are calculated from.</div>
     <div class="card">
-      <h3>Cost rates</h3>
+      <h3>Electricity</h3>
+      <div class="page-sub" style="margin-bottom:14px;">Cost per hour = (wattage ÷ 1000) × hours used × cost per kWh. Currently that works out to ${inr(getRate('electricity'))} per hour.</div>
       <div class="field-row">
-        ${OTHER_COST_DEFS.map(d=>`
+        <div class="field"><label>Appliance wattage (W)</label>
+          <input type="number" step="any" id="elec-wattage" value="${elec.wattage}">
+        </div>
+        <div class="field"><label>Cost per kWh (₹, from your electricity bill)</label>
+          <input type="number" step="any" id="elec-cost-per-kwh" value="${elec.costPerKwh}">
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Other cost rates</h3>
+      <div class="field-row">
+        ${nonElectricityDefs.map(d=>`
           <div class="field"><label>${d.label} (₹ per ${d.unit})</label>
             <input type="number" step="any" class="rate-input" data-key="${d.key}" value="${s.rates[d.key]}">
           </div>
@@ -1495,6 +1610,10 @@ function attachSettingsHandlers(){
     document.querySelectorAll('.rate-input').forEach(inp=>{
       STATE.settings.rates[inp.dataset.key] = parseFloat(inp.value)||0;
     });
+    STATE.settings.electricity = {
+      wattage: parseFloat(document.getElementById('elec-wattage').value)||0,
+      costPerKwh: parseFloat(document.getElementById('elec-cost-per-kwh').value)||0,
+    };
     STATE.settings.defaultMargin = parseFloat(document.getElementById('default-margin').value)||0;
     await saveKey('settings', STATE.settings);
     render();
