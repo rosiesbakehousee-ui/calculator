@@ -206,14 +206,26 @@ let cloudConfig = loadCloudConfig();
 function cloudDataUrl(cfg){
   return `${cfg.databaseURL}/rosiesBakehouse/${encodeURIComponent(cfg.code)}.json`;
 }
+async function fetchWithTimeout(url, options={}, timeoutMs=12000){
+  const controller = new AbortController();
+  const timer = setTimeout(()=>controller.abort(), timeoutMs);
+  try{
+    return await fetch(url, {...options, signal: controller.signal});
+  }catch(e){
+    if(e.name==='AbortError') throw new Error('timed out — check your internet connection');
+    throw e;
+  }finally{
+    clearTimeout(timer);
+  }
+}
 async function cloudFetchBundle(cfg){
-  const res = await fetch(cloudDataUrl(cfg));
+  const res = await fetchWithTimeout(cloudDataUrl(cfg));
   if(!res.ok) throw new Error('HTTP '+res.status+' — check your database URL');
   const data = await res.json();
   return data || {};
 }
 async function cloudPushBundle(cfg, bundle){
-  const res = await fetch(cloudDataUrl(cfg), {
+  const res = await fetchWithTimeout(cloudDataUrl(cfg), {
     method:'PUT',
     headers: { 'Content-Type':'application/json' },
     body: JSON.stringify(bundle)
@@ -223,9 +235,12 @@ async function cloudPushBundle(cfg, bundle){
 
 let cloudBundle = null; // in-memory cache of the whole synced record, once fetched
 let cloudBundlePromise = null; // in-flight fetch, shared so concurrent calls don't each trigger their own request
+let cloudLoadError = null;
 function getCloudBundle(){
   if(cloudBundlePromise===null){
-    cloudBundlePromise = cloudFetchBundle(cloudConfig).then(b=>{ cloudBundle=b; return b; });
+    cloudBundlePromise = cloudFetchBundle(cloudConfig)
+      .then(b=>{ cloudBundle=b; cloudLoadError=null; return b; })
+      .catch(e=>{ cloudBundlePromise=null; cloudLoadError=e; throw e; }); // reset so a later retry can fetch again
   }
   return cloudBundlePromise;
 }
@@ -337,6 +352,10 @@ let STATE = {
 };
 
 async function init(){
+  if(cloudConfig){
+    const el = document.getElementById('root');
+    if(el) el.textContent = 'Fetching your synced data…';
+  }
   const [materials, settings, recipes, sales, purchases] = await Promise.all([
     loadKey('materials', window.__MATERIALS_SEED__),
     loadKey('settings', DEFAULT_SETTINGS),
@@ -350,8 +369,18 @@ async function init(){
   STATE.sales = sales;
   STATE.purchases = purchases;
   if(!materials || materials.length===0){
-    STATE.materials = window.__MATERIALS_SEED__;
-    await saveKey('materials', STATE.materials);
+    if(cloudConfig){
+      // Never auto-seed-and-save over a connected cloud workspace: an empty read
+      // here could mean the fetch genuinely failed (network hiccup, timeout) rather
+      // than the workspace really being empty, and saving would overwrite real data
+      // with the blank default list. Just show what we have and say why, if we know.
+      if(cloudLoadError){
+        await modalAlert(`Couldn't load your synced data (${cloudLoadError.message||'unknown error'}). Your data in the cloud hasn't been touched — try reloading the page. Showing an empty view for now.`);
+      }
+    } else {
+      STATE.materials = window.__MATERIALS_SEED__;
+      await saveKey('materials', STATE.materials);
+    }
   }
   render();
 }
@@ -1551,4 +1580,60 @@ async function analyzeRecipePhoto(fileData){
   const ingredientNames = STATE.materials.map(m=>m.name);
   const prompt = `You are reading a photo of a home baker's recipe (a recipe card, printout, or handwritten note).
 Extract the recipe as JSON only — no markdown fences, no commentary, just a JSON object with this exact shape:
-{"name": "recipe name as best you can tell", "ingredients": [{"ingredient": "ingredient name as written in the photo", "qty": number, "unit
+{"name": "recipe name as best you can tell", "ingredients": [{"ingredient": "ingredient name as written in the photo", "qty": number, "unit": "gram|mililitre|piece"}]}
+
+Rules:
+- Convert every quantity to grams for solids, millilitres for liquids, or a whole-number count for discrete items (eggs, bananas, lemons) — do not use cups, tablespoons, or teaspoons in the output; convert them to grams/millilitres using standard baking conversions.
+- If a quantity is genuinely unclear, make a reasonable estimate rather than omitting the ingredient.
+- Where possible, match each ingredient's name to one of these known ingredient names (use the exact spelling from this list when it's a good match): ${ingredientNames.join(', ')}.
+- If an ingredient isn't in that list, just write its name as seen in the photo.
+- Output only the JSON object, nothing else.`;
+
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-6",
+      max_tokens: 1000,
+      messages: [{
+        role: "user",
+        content: [
+          { type: "image", source: { type:"base64", media_type: fileData.mediaType, data: fileData.base64 } },
+          { type: "text", text: prompt }
+        ]
+      }]
+    })
+  });
+  if(!response.ok) throw new Error('API error ' + response.status);
+  const data = await response.json();
+  const textBlock = (data.content||[]).find(b=>b.type==='text');
+  if(!textBlock) throw new Error('no text in response');
+  const cleaned = textBlock.text.replace(/```json|```/g,'').trim();
+  let parsed;
+  try{ parsed = JSON.parse(cleaned); }
+  catch(e){ throw new Error('could not parse what was read'); }
+
+  const unmatched = [];
+  const ingredients = (parsed.ingredients||[]).map(ing=>{
+    const match = bestMaterialMatch(ing.ingredient);
+    if(!match) unmatched.push(ing.ingredient);
+    return { materialId: match ? match.id : '', qty: Math.round((ing.qty||0)*100)/100, _photoName: ing.ingredient };
+  });
+
+  const draft = {
+    __wasNew: true,
+    id: null,
+    name: parsed.name || 'New recipe from photo',
+    ingredients,
+    otherCosts: [],
+    margin: STATE.settings.defaultMargin,
+    _unmatched: unmatched,
+  };
+  return draft;
+}
+
+init();
+
+</script>
+</body>
+</html>
