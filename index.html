@@ -97,6 +97,8 @@
   .field-row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;}
 
   .pill{display:inline-block;font-size:11px;font-weight:600;padding:2px 9px;border-radius:99px;background:var(--cream-2);color:var(--espresso-soft);}
+  .pill-discount{display:inline-block;font-size:10.5px;font-weight:700;padding:2px 8px;border-radius:99px;background:#FBEEDD;color:var(--terracotta-dark);margin-left:6px;white-space:nowrap;}
+  tr.discount-row{background:#FEFAF3;}
   .empty{color:var(--espresso-soft);font-size:13.5px;padding:20px 4px;text-align:center;}
 
   .ingredient-line{display:grid;grid-template-columns:2.2fr 1fr 1fr 32px;gap:10px;margin-bottom:8px;align-items:center;}
@@ -918,12 +920,18 @@ function salesPage(){
         <tbody>
           ${sorted.map(s=>{
             const revenue=(s.qty||0)*(s.price||0), cost=(s.costPerUnit||0)*(s.qty||0), profit=revenue-cost;
-            return `<tr data-id="${s.id}">
+            let referencePrice = s.suggestedPriceAtSale;
+            if(referencePrice===undefined){
+              const rec = STATE.recipes.find(r=>r.id===s.recipeId);
+              referencePrice = rec ? computeRecipeCost(rec).suggestedPrice : undefined;
+            }
+            const isDiscounted = referencePrice!==undefined && s.price < referencePrice;
+            return `<tr data-id="${s.id}" ${isDiscounted?'class="discount-row"':''}>
               <td>${s.date||'—'}</td>
               <td>${s.recipeName}</td>
               <td>${s.client||'—'}</td>
               <td class="num">${s.qty}</td>
-              <td class="num">${inr(s.price)}</td>
+              <td class="num">${inr(s.price)} ${isDiscounted?'<span class="pill-discount" title="Below the suggested price of '+inr(referencePrice)+'">Discounted</span>':''}</td>
               <td class="num">${inr(revenue)}</td>
               <td class="num">${inr(cost)}</td>
               <td class="num" style="color:${profit>=0?'var(--sage-dark)':'var(--red)'};font-weight:600;">${inr(profit)}</td>
@@ -976,6 +984,7 @@ function attachSalesHandlers(){
       client: document.getElementById('sl-client').value.trim(),
       qty, price,
       costPerUnit: c.totalCost,
+      suggestedPriceAtSale: round2(c.suggestedPrice),
       payMethod: document.getElementById('sl-paymethod').value,
       payStatus: document.getElementById('sl-paystatus').value,
       orderStatus: document.getElementById('sl-orderstatus').value,
