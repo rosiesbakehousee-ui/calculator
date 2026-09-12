@@ -1131,7 +1131,7 @@ function attachSalesHandlers(){
 
   // Which standardized portion sizes make sense for this recipe's own unit family.
   // Weight-based recipes (g/kg) get weight presets; piece-based get piece presets;
-  // anything else (ml, or no batch size set at all) falls back to free entry.
+  // ml-based recipes have no standard presets yet, so they always use direct entry.
   function portionOptionsForRecipe(rec){
     if(!rec || !rec.yieldQty || !rec.yieldUnit) return null;
     if(rec.yieldUnit==='g' || rec.yieldUnit==='kg') return STANDARD_YIELDS.filter(p=>p.unit==='g'||p.unit==='kg');
@@ -1144,12 +1144,51 @@ function attachSalesHandlers(){
     return toGrams(presetQty, presetUnit) / toGrams(rec.yieldQty, rec.yieldUnit);
   }
 
-  // Rebuilds the "units / portion sold" control to match whichever recipe is picked:
-  // a dropdown of standard sizes when the recipe has a batch size set, a free number
-  // otherwise. Always leaves a #sl-qty input somewhere in the DOM (hidden when a
-  // preset is active) so the rest of the form can keep reading it the same way.
+  // Custom entry is always in the recipe's own natural unit — grams for a weight
+  // recipe (never kg, for finer-grained entry), pieces for a piece recipe, ml for
+  // an ml recipe — converted to the qty ratio the rest of the app already uses.
+  function qtyRatioFromCustomAmount(rec, amount){
+    if(rec.yieldUnit==='piece' || rec.yieldUnit==='ml') return amount / rec.yieldQty;
+    return amount / toGrams(rec.yieldQty, rec.yieldUnit);
+  }
+  function customAmountFromRatio(rec, qty){
+    if(!rec || !rec.yieldQty) return '';
+    if(rec.yieldUnit==='piece' || rec.yieldUnit==='ml') return qty * rec.yieldQty;
+    return qty * toGrams(rec.yieldQty, rec.yieldUnit);
+  }
+  function customFieldLabel(rec){
+    if(rec.yieldUnit==='piece') return 'Pieces sold, e.g. 3';
+    if(rec.yieldUnit==='ml') return 'ml sold, e.g. 150';
+    return 'Grams sold, e.g. 400';
+  }
+
+  // Rebuilds the "units / portion sold" control to match whichever recipe is picked.
+  // Weight/piece recipes get a dropdown of standard sizes plus "Custom…" (which asks
+  // for the actual grams/pieces sold, not a fraction). ml recipes — no standard sizes
+  // exist for those yet — always show a direct "ml sold" entry. Recipes with no batch
+  // size set at all fall back to a plain fraction-of-batch entry, since there's no
+  // reference amount to convert against. Always leaves a #sl-qty input somewhere in
+  // the DOM (hidden when a size-based entry is active) holding the actual ratio, so
+  // the rest of the form can keep reading it the same way regardless of which mode.
   function renderPortionControl(){
     const rec = STATE.recipes.find(r=>r.id===recipeSel.value);
+
+    if(rec && rec.yieldQty && rec.yieldUnit==='ml'){
+      qtyControl.innerHTML = `
+        <input type="number" step="any" id="sl-qty-custom" placeholder="${customFieldLabel(rec)}">
+        <input type="hidden" id="sl-qty" value="">
+      `;
+      const customInput = document.getElementById('sl-qty-custom');
+      const qtyInput = document.getElementById('sl-qty');
+      customInput.addEventListener('input', ()=>{
+        const amt = parseFloat(customInput.value)||0;
+        qtyInput.value = Math.round(qtyRatioFromCustomAmount(rec, amt)*10000)/10000;
+        recomputeLiveSuggestion();
+      });
+      recomputeLiveSuggestion();
+      return;
+    }
+
     const options = portionOptionsForRecipe(rec);
     if(!options){
       qtyControl.innerHTML = `<input type="number" step="any" id="sl-qty" placeholder="e.g. 1 or 0.5" value="1">`;
@@ -1164,15 +1203,18 @@ function attachSalesHandlers(){
         <option value="custom">Custom…</option>
       </select>
       <div id="sl-qty-custom-row" style="display:none;margin-top:8px;">
-        <input type="number" step="any" id="sl-qty" placeholder="fraction of the whole batch, e.g. 0.5" value="1">
+        <input type="number" step="any" id="sl-qty-custom" placeholder="${customFieldLabel(rec)}">
+        <input type="hidden" id="sl-qty" value="">
       </div>
     `;
     const presetSel = document.getElementById('sl-portion-preset');
     const customRow = document.getElementById('sl-qty-custom-row');
     const qtyInput = document.getElementById('sl-qty');
+    const customInput = document.getElementById('sl-qty-custom');
     presetSel.addEventListener('change', ()=>{
       if(presetSel.value==='custom'){
         customRow.style.display = 'block';
+        qtyInput.value = customInput.value ? Math.round(qtyRatioFromCustomAmount(rec, parseFloat(customInput.value)||0)*10000)/10000 : '';
       } else if(presetSel.value===''){
         customRow.style.display = 'none';
         qtyInput.value = '';
@@ -1183,7 +1225,11 @@ function attachSalesHandlers(){
       }
       recomputeLiveSuggestion();
     });
-    qtyInput.addEventListener('input', recomputeLiveSuggestion);
+    customInput.addEventListener('input', ()=>{
+      const amt = parseFloat(customInput.value)||0;
+      qtyInput.value = Math.round(qtyRatioFromCustomAmount(rec, amt)*10000)/10000;
+      recomputeLiveSuggestion();
+    });
     recomputeLiveSuggestion();
   }
 
@@ -1207,11 +1253,25 @@ function attachSalesHandlers(){
     if(priceUntouched) priceInput.value = suggestedTotal;
     priceInput.dataset.suggested = suggestedTotal;
     costInput.value = inr(costTotal);
+
     const presetSel = document.getElementById('sl-portion-preset');
-    const sizeDescription = (presetSel && presetSel.value && presetSel.value!=='custom')
-      ? presetSel.options[presetSel.selectedIndex].textContent
-      : `${qty} unit(s)`;
-    hint.textContent = `For ${sizeDescription}: suggested price ${inr(suggestedTotal)}, cost ${inr(costTotal)}. Change the price above if you sold it for something different.`;
+    const isStandardSize = presetSel && presetSel.value && presetSel.value!=='custom';
+    let sizeDescription;
+    if(isStandardSize){
+      sizeDescription = presetSel.options[presetSel.selectedIndex].textContent;
+    } else {
+      const customEl = document.getElementById('sl-qty-custom');
+      if(customEl && customEl.value){
+        const unitWord = rec.yieldUnit==='piece' ? (parseFloat(customEl.value)===1?'piece':'pieces') : (rec.yieldUnit==='ml' ? 'ml' : 'g');
+        sizeDescription = `${customEl.value} ${unitWord}`;
+      } else {
+        sizeDescription = `${qty} unit(s)`;
+      }
+    }
+
+    hint.textContent = isStandardSize
+      ? `Your set price for ${sizeDescription} is ${inr(suggestedTotal)}. Cost: ${inr(costTotal)}.`
+      : `Estimated price for ${sizeDescription} (based on your standard pricing): ${inr(suggestedTotal)} — adjust as needed. Cost: ${inr(costTotal)}.`;
   }
 
   if(recipeSel) recipeSel.addEventListener('change', renderPortionControl);
@@ -1221,8 +1281,10 @@ function attachSalesHandlers(){
   // with that sale's actual values now that the recipe-dependent control exists.
   const editingSale = editingSaleId ? STATE.sales.find(s=>s.id===editingSaleId) : null;
   if(editingSale){
+    const rec = STATE.recipes.find(r=>r.id===editingSale.recipeId);
     const presetSel = document.getElementById('sl-portion-preset');
     const qtyInputNow = document.getElementById('sl-qty');
+    const customInputNow = document.getElementById('sl-qty-custom');
     if(presetSel){
       let matchedValue = 'custom';
       for(const opt of presetSel.options){
@@ -1232,10 +1294,17 @@ function attachSalesHandlers(){
       }
       presetSel.value = matchedValue;
       presetSel.dispatchEvent(new Event('change'));
-      if(matchedValue==='custom'){
+      if(matchedValue==='custom' && rec){
+        const customEl = document.getElementById('sl-qty-custom');
+        if(customEl) customEl.value = round2(customAmountFromRatio(rec, editingSale.qty));
         document.getElementById('sl-qty').value = editingSale.qty;
       }
+    } else if(customInputNow && rec){
+      // ml recipes: always-custom control, no preset dropdown
+      customInputNow.value = round2(customAmountFromRatio(rec, editingSale.qty));
+      qtyInputNow.value = editingSale.qty;
     } else if(qtyInputNow){
+      // no batch size set on this recipe — plain fraction entry
       qtyInputNow.value = editingSale.qty;
     }
     recomputeLiveSuggestion();
