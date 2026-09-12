@@ -1549,10 +1549,10 @@ function monthlySummary(){
   STATE.sales.forEach(s=>{
     const d = s.date ? new Date(s.date) : null;
     const key = d && !isNaN(d) ? `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}` : 'Undated';
-    if(!map[key]) map[key] = {key, revenue:0, cost:0, units:0};
+    if(!map[key]) map[key] = {key, revenue:0, cost:0, count:0};
     map[key].revenue += saleRevenue(s);
     map[key].cost += saleCost(s);
-    map[key].units += (s.qty||0);
+    map[key].count += 1;
   });
   const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   return Object.values(map).map(m=>{
@@ -1561,7 +1561,7 @@ function monthlySummary(){
       const [y,mo] = m.key.split('-');
       label = `${monthNames[parseInt(mo)-1]} ${y}`;
     }
-    return {...m, label, profit: m.revenue-m.cost};
+    return {...m, label, revenue: round2(m.revenue), cost: round2(m.cost), profit: round2(m.revenue-m.cost)};
   }).sort((a,b)=> b.key.localeCompare(a.key));
 }
 
@@ -1679,14 +1679,14 @@ function overviewPage(){
       <h3>Monthly overview</h3>
       ${monthly.length===0 ? '<div class="empty">Log a sale to see a monthly breakdown.</div>' : `
       <table>
-        <thead><tr><th>Month</th><th class="num">Units sold</th><th class="num">Revenue</th><th class="num">Cost</th><th class="num">Profit</th><th>Margin %</th></tr></thead>
+        <thead><tr><th>Month</th><th class="num">Sales made</th><th class="num">Revenue</th><th class="num">Cost</th><th class="num">Profit</th><th>Margin %</th></tr></thead>
         <tbody>
           ${monthly.map(m=>{
             const marginPct = m.revenue>0 ? (m.profit/m.revenue*100) : 0;
             const barWidth = Math.max(2, Math.round((m.revenue/maxMonthRevenue)*100));
             return `<tr>
               <td>${m.label}</td>
-              <td class="num">${m.units}</td>
+              <td class="num">${m.count}</td>
               <td class="num">
                 <div style="display:flex;align-items:center;gap:8px;justify-content:flex-end;">
                   <div style="height:8px;width:${barWidth}px;max-width:80px;background:var(--terracotta);border-radius:4px;"></div>
@@ -1701,7 +1701,7 @@ function overviewPage(){
         </tbody>
         <tfoot><tr class="total-row">
           <td>TOTAL</td>
-          <td class="num">${monthly.reduce((a,m)=>a+m.units,0)}</td>
+          <td class="num">${monthly.reduce((a,m)=>a+m.count,0)}</td>
           <td class="num">${inr(totals.revenue)}</td>
           <td class="num">${inr(totals.cost)}</td>
           <td class="num">${inr(totals.profit)}</td>
