@@ -508,7 +508,7 @@ function perProductSummary(){
     g.cost += saleCost(s);
   });
   return Object.values(map).map(r=>({...r, profit:r.revenue-r.cost}))
-    .sort((a,b)=>b.revenue-a.revenue);
+    .sort((a,b)=>b.count-a.count);
 }
 
 // ---------- Render root ----------
@@ -1068,9 +1068,9 @@ function formatDDMM(dateStr){
   if(!dateStr) return '—';
   const d = new Date(dateStr+'T00:00:00');
   if(isNaN(d)) return dateStr;
+  const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   const dd = String(d.getDate()).padStart(2,'0');
-  const mm = String(d.getMonth()+1).padStart(2,'0');
-  return `${dd}-${mm}`;
+  return `${dd}-${monthNames[d.getMonth()]}`;
 }
 
 // Builds the sales log's table rows with a year divider inserted whenever the
