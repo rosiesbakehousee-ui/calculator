@@ -476,7 +476,7 @@ function saleQuantityLabel(s){
     if(rec.yieldUnit==='ml') return `${rounded} ml`;
     return `${rounded} g`;
   }
-  return `${s.qty}× batch`;
+  return `${s.qty} unit(s)`;
 }
 
 function salesTotals(){
@@ -490,13 +490,42 @@ function salesTotals(){
   return {revenue, cost, profit, marginPct};
 }
 
+// Converts a sale's qty ratio into a real amount (grams/ml/pieces) using its
+// recipe's batch size, for aggregating "units sold" without falling back to a
+// bare fraction — mirrors saleQuantityLabel's conversion but returns a number.
+function saleAmountForAggregation(s){
+  const rec = STATE.recipes.find(r=>r.id===s.recipeId);
+  if(rec && rec.yieldQty && rec.yieldUnit){
+    if(rec.yieldUnit==='kg') return { amount: (s.qty||0)*rec.yieldQty*1000, unit:'g' };
+    return { amount: (s.qty||0)*rec.yieldQty, unit: rec.yieldUnit };
+  }
+  return null;
+}
+function formatAggregatedAmount(group){
+  if(group.unit && !group.mixedOrUnknown){
+    const rounded = Math.round(group.amount);
+    if(group.unit==='piece') return `${rounded} ${rounded===1?'piece':'pieces'}`;
+    if(group.unit==='ml') return `${rounded} ml`;
+    return `${rounded} g`;
+  }
+  return `${Math.round(group.qty*100)/100} unit(s)`;
+}
+
 function perProductSummary(){
   const map = {};
   STATE.sales.forEach(s=>{
-    if(!map[s.recipeName]) map[s.recipeName] = {name:s.recipeName, qty:0, revenue:0, cost:0};
-    map[s.recipeName].qty += s.qty||0;
-    map[s.recipeName].revenue += saleRevenue(s);
-    map[s.recipeName].cost += saleCost(s);
+    if(!map[s.recipeName]) map[s.recipeName] = {name:s.recipeName, qty:0, revenue:0, cost:0, amount:0, unit:null, mixedOrUnknown:false};
+    const g = map[s.recipeName];
+    g.qty += s.qty||0;
+    g.revenue += saleRevenue(s);
+    g.cost += saleCost(s);
+    const conv = saleAmountForAggregation(s);
+    if(conv && (g.unit===null || g.unit===conv.unit)){
+      g.unit = conv.unit;
+      g.amount += conv.amount;
+    } else {
+      g.mixedOrUnknown = true;
+    }
   });
   return Object.values(map).map(r=>({...r, profit:r.revenue-r.cost}))
     .sort((a,b)=>b.revenue-a.revenue);
@@ -928,8 +957,6 @@ function attachRecipeEditorHandlers(){
   document.getElementById('rc-add-ingredient').addEventListener('click', ()=>{
     const draft = readRecipeFromForm();
     draft.ingredients.push({materialId:'', qty:0});
-    editingRecipe = editingRecipe==='new' ? {...draft, id:null, __new:true} : {...editingRecipe, ...draft};
-    if(editingRecipe.__new) editingRecipe = 'new', STATE.__draftIngredients = draft.ingredients;
     rerenderEditorWithDraft(draft, draft.ingredients, draft.otherCosts);
   });
   document.getElementById('rc-add-othercost').addEventListener('click', ()=>{
@@ -1058,11 +1085,13 @@ function salesPage(){
       <h3>${editingSale ? 'Edit sale' : 'New sale'}</h3>
       <div class="field-row3">
         <div class="field"><label>Date</label><input type="date" id="sl-date" value="${editingSale ? editingSale.date : new Date().toISOString().slice(0,10)}"></div>
-        <div class="field"><label>Recipe / product</label>
+        <div class="field" id="sl-recipe-field"><label>Recipe / product</label>
           <select id="sl-recipe">
             <option value="">Select a recipe…</option>
+            <option value="__custom__" ${editingSale && !editingSale.recipeId?'selected':''}>Custom / off-menu item</option>
             ${STATE.recipes.slice().sort((a,b)=>a.name.localeCompare(b.name)).map(r=>`<option value="${r.id}" ${editingSale && editingSale.recipeId===r.id?'selected':''}>${r.name}</option>`).join('')}
           </select>
+          <input id="sl-custom-name" placeholder="e.g. 3-tier wedding cake" style="display:none;margin-top:8px;" value="${editingSale && !editingSale.recipeId ? (editingSale.recipeName||'') : ''}">
         </div>
         <div class="field"><label>Client name (optional)</label><input id="sl-client" placeholder="e.g. Priya" value="${editingSale ? (editingSale.client||'') : ''}"></div>
       </div>
@@ -1071,7 +1100,7 @@ function salesPage(){
           <div id="sl-qty-control"><input type="number" step="any" id="sl-qty" placeholder="e.g. 1 or 0.5" value="1"></div>
         </div>
         <div class="field"><label>Selling price for this sale (₹)</label><input type="number" step="any" id="sl-price"></div>
-        <div class="field"><label>Cost for this sale (₹, auto)</label><input id="sl-cost" disabled></div>
+        <div class="field"><label id="sl-cost-label">Cost for this sale (₹, auto)</label><input id="sl-cost" disabled></div>
       </div>
       <div class="page-sub" id="sl-hint" style="margin-top:-6px;margin-bottom:14px;"></div>
       <div class="field-row3">
@@ -1093,9 +1122,9 @@ function salesPage(){
       </div>
       <div class="row" style="justify-content:flex-end;">
         ${editingSale ? `<button class="btn btn-secondary" id="sl-cancel-edit">Cancel</button>` : ''}
-        <button class="btn btn-primary" id="sl-add" ${STATE.recipes.length===0?'disabled title="Add a recipe first"':''}>${editingSale ? 'Save changes' : '+ Add sale'}</button>
+        <button class="btn btn-primary" id="sl-add">${editingSale ? 'Save changes' : '+ Add sale'}</button>
       </div>
-      ${STATE.recipes.length===0 ? '<div class="empty">You need at least one saved recipe before you can log a sale — head to Recipes &amp; Pricing first.</div>' : ''}
+      ${STATE.recipes.length===0 ? '<div class="empty">No recipes saved yet — you can still log a sale as a Custom / off-menu item, or head to Recipes &amp; Pricing to add one.</div>' : ''}
     </div>
 
     <div class="card">
@@ -1110,7 +1139,9 @@ function salesPage(){
           ${sorted.map(s=>{
             const revenue = saleRevenue(s), cost = saleCost(s), profit = revenue-cost;
             const referencePrice = saleReferencePrice(s);
-            const isDiscounted = referencePrice!==undefined && revenue < referencePrice;
+            // A sale within ₹1 of the suggested price is just rounding to a whole
+            // rupee, not a real discount — only flag when the gap is a full rupee or more.
+            const isDiscounted = referencePrice!==undefined && (referencePrice - revenue) >= 1;
             return `<tr data-id="${s.id}" ${isDiscounted?'class="discount-row"':''}>
               <td>${s.date||'—'}</td>
               <td>${s.recipeName}</td>
@@ -1143,8 +1174,16 @@ function attachSalesHandlers(){
   const recipeSel = document.getElementById('sl-recipe');
   const priceInput = document.getElementById('sl-price');
   const costInput = document.getElementById('sl-cost');
+  const costLabel = document.getElementById('sl-cost-label');
   const hint = document.getElementById('sl-hint');
   const qtyControl = document.getElementById('sl-qty-control');
+  const customNameInput = document.getElementById('sl-custom-name');
+
+  function isCustomMode(){ return recipeSel.value==='__custom__'; }
+
+  function toggleCustomNameField(){
+    customNameInput.style.display = isCustomMode() ? 'block' : 'none';
+  }
 
   function toGrams(qty, unit){ return unit==='kg' ? qty*1000 : qty; }
 
@@ -1190,6 +1229,20 @@ function attachSalesHandlers(){
   // the DOM (hidden when a size-based entry is active) holding the actual ratio, so
   // the rest of the form can keep reading it the same way regardless of which mode.
   function renderPortionControl(){
+    toggleCustomNameField();
+    if(isCustomMode()){
+      qtyControl.innerHTML = `<input type="number" step="any" id="sl-qty" placeholder="e.g. 1" value="1">`;
+      document.getElementById('sl-qty').addEventListener('input', recomputeLiveSuggestion);
+      costInput.disabled = false;
+      costLabel.textContent = 'Estimated cost for this sale (₹)';
+      costInput.placeholder = 'Enter your estimate';
+      recomputeLiveSuggestion();
+      return;
+    }
+    costInput.disabled = true;
+    costLabel.textContent = 'Cost for this sale (₹, auto)';
+    costInput.placeholder = '';
+
     const rec = STATE.recipes.find(r=>r.id===recipeSel.value);
 
     if(rec && rec.yieldQty && rec.yieldUnit==='ml'){
@@ -1199,6 +1252,10 @@ function attachSalesHandlers(){
       `;
       const customInput = document.getElementById('sl-qty-custom');
       const qtyInput = document.getElementById('sl-qty');
+      // Default to the recipe's own whole batch, so the price shown before you
+      // touch anything is "your set price," not a blank or an arbitrary guess.
+      customInput.value = round2(rec.yieldQty);
+      qtyInput.value = 1;
       customInput.addEventListener('input', ()=>{
         const amt = parseFloat(customInput.value)||0;
         qtyInput.value = Math.round(qtyRatioFromCustomAmount(rec, amt)*10000)/10000;
@@ -1230,6 +1287,21 @@ function attachSalesHandlers(){
     const customRow = document.getElementById('sl-qty-custom-row');
     const qtyInput = document.getElementById('sl-qty');
     const customInput = document.getElementById('sl-qty-custom');
+
+    // Default to the recipe's own whole batch — a matching standard size if it
+    // has one, otherwise Custom pre-filled with the recipe's actual batch amount.
+    // Either way the price shown before you touch anything is "your set price."
+    const matchingPreset = options.find(p=>p.qty===rec.yieldQty && p.unit===rec.yieldUnit);
+    if(matchingPreset){
+      presetSel.value = `${matchingPreset.qty}|${matchingPreset.unit}`;
+      qtyInput.value = 1;
+    } else {
+      presetSel.value = 'custom';
+      customRow.style.display = 'block';
+      customInput.value = round2(rec.yieldUnit==='kg' ? rec.yieldQty*1000 : rec.yieldQty);
+      qtyInput.value = 1;
+    }
+
     presetSel.addEventListener('change', ()=>{
       if(presetSel.value==='custom'){
         customRow.style.display = 'block';
@@ -1257,6 +1329,10 @@ function attachSalesHandlers(){
   // holds the last suggestion (or is empty) — once you type your own number, it's
   // left alone even if you then tweak the quantity, so your actual price sticks.
   function recomputeLiveSuggestion(){
+    if(isCustomMode()){
+      hint.textContent = 'Custom item — nothing is calculated automatically here; enter your own estimated cost and the price you charged.';
+      return;
+    }
     const rec = STATE.recipes.find(r=>r.id===recipeSel.value);
     const qtyInput = document.getElementById('sl-qty');
     const qty = parseFloat(qtyInput.value)||0;
@@ -1274,9 +1350,15 @@ function attachSalesHandlers(){
     costInput.value = inr(costTotal);
 
     const presetSel = document.getElementById('sl-portion-preset');
-    const isStandardSize = presetSel && presetSel.value && presetSel.value!=='custom';
+    // "Your set price" applies whenever this is exactly the recipe's own whole
+    // batch (qty ratio of 1) — regardless of whether that happened to line up
+    // with a standard preset or the recipe's own batch size is a custom amount.
+    // Anything else (a different size, a partial amount) is an estimate.
+    const isWholeBatch = Math.abs(qty-1) < 0.0001;
     let sizeDescription;
-    if(isStandardSize){
+    if(isWholeBatch){
+      sizeDescription = yieldLabel(rec) || `${qty} unit(s)`;
+    } else if(presetSel && presetSel.value && presetSel.value!=='custom'){
       sizeDescription = presetSel.options[presetSel.selectedIndex].textContent;
     } else {
       const customEl = document.getElementById('sl-qty-custom');
@@ -1288,7 +1370,7 @@ function attachSalesHandlers(){
       }
     }
 
-    hint.textContent = isStandardSize
+    hint.textContent = isWholeBatch
       ? `Your set price for ${sizeDescription} is ${inr(suggestedTotal)}. Cost: ${inr(costTotal)}.`
       : `Estimated price for ${sizeDescription} (based on your standard pricing): ${inr(suggestedTotal)} — adjust as needed. Cost: ${inr(costTotal)}.`;
   }
@@ -1299,7 +1381,14 @@ function attachSalesHandlers(){
   // If we're editing an existing sale, populate the portion control and price
   // with that sale's actual values now that the recipe-dependent control exists.
   const editingSale = editingSaleId ? STATE.sales.find(s=>s.id===editingSaleId) : null;
-  if(editingSale){
+  if(editingSale && !editingSale.recipeId){
+    // Custom / off-menu sale — everything here is manual, just restore it directly.
+    recipeSel.value = '__custom__';
+    renderPortionControl();
+    document.getElementById('sl-qty').value = editingSale.qty;
+    costInput.value = editingSale.cost;
+    priceInput.value = editingSale.price;
+  } else if(editingSale){
     const rec = STATE.recipes.find(r=>r.id===editingSale.recipeId);
     const presetSel = document.getElementById('sl-portion-preset');
     const qtyInputNow = document.getElementById('sl-qty');
@@ -1342,33 +1431,56 @@ function attachSalesHandlers(){
 
   const addBtn = document.getElementById('sl-add');
   if(addBtn) addBtn.addEventListener('click', async ()=>{
-    const rec = STATE.recipes.find(r=>r.id===recipeSel.value);
-    if(!rec){ await modalAlert('Choose a recipe.'); return; }
     const qtyInput = document.getElementById('sl-qty');
     const qty = parseFloat(qtyInput.value)||0;
     const price = parseFloat(priceInput.value)||0;
-    const sc = saleCostAndSuggested(rec, qty);
-    const presetSel = document.getElementById('sl-portion-preset');
-    let portionLabel = null;
-    if(presetSel && presetSel.value && presetSel.value!=='custom'){
-      const opt = presetSel.options[presetSel.selectedIndex];
-      portionLabel = opt.textContent;
+    let saleFields;
+
+    if(isCustomMode()){
+      const customName = customNameInput.value.trim();
+      if(!customName){ await modalAlert('Give the custom item a name.'); return; }
+      const cost = parseFloat(costInput.value)||0;
+      saleFields = {
+        date: document.getElementById('sl-date').value,
+        recipeId: null,
+        recipeName: customName,
+        client: document.getElementById('sl-client').value.trim(),
+        qty,
+        portionLabel: null,
+        price,
+        cost,                          // entered manually — nothing calculated for custom items
+        totalsPreComputed: true,
+        payMethod: document.getElementById('sl-paymethod').value,
+        payStatus: document.getElementById('sl-paystatus').value,
+        orderStatus: document.getElementById('sl-orderstatus').value,
+      };
+    } else {
+      const rec = STATE.recipes.find(r=>r.id===recipeSel.value);
+      if(!rec){ await modalAlert('Choose a recipe.'); return; }
+      const sc = saleCostAndSuggested(rec, qty);
+      const presetSel = document.getElementById('sl-portion-preset');
+      let portionLabel = null;
+      if(presetSel && presetSel.value && presetSel.value!=='custom'){
+        const opt = presetSel.options[presetSel.selectedIndex];
+        portionLabel = opt.textContent;
+      }
+      saleFields = {
+        date: document.getElementById('sl-date').value,
+        recipeId: rec.id,
+        recipeName: rec.name,
+        client: document.getElementById('sl-client').value.trim(),
+        qty,
+        portionLabel,
+        price,                          // total price actually charged for this sale
+        cost: sc.cost,                  // ingredient cost scaled by qty + full other-costs, always automatic
+        suggestedPriceAtSale: sc.suggested,
+        totalsPreComputed: true,
+        payMethod: document.getElementById('sl-paymethod').value,
+        payStatus: document.getElementById('sl-paystatus').value,
+        orderStatus: document.getElementById('sl-orderstatus').value,
+      };
     }
-    const saleFields = {
-      date: document.getElementById('sl-date').value,
-      recipeId: rec.id,
-      recipeName: rec.name,
-      client: document.getElementById('sl-client').value.trim(),
-      qty,
-      portionLabel,
-      price,                          // total price actually charged for this sale
-      cost: sc.cost,                  // ingredient cost scaled by qty + full other-costs, always automatic
-      suggestedPriceAtSale: sc.suggested,
-      totalsPreComputed: true,
-      payMethod: document.getElementById('sl-paymethod').value,
-      payStatus: document.getElementById('sl-paystatus').value,
-      orderStatus: document.getElementById('sl-orderstatus').value,
-    };
+
     if(editingSaleId){
       const idx = STATE.sales.findIndex(s=>s.id===editingSaleId);
       if(idx>-1) STATE.sales[idx] = { ...STATE.sales[idx], ...saleFields };
@@ -1560,7 +1672,7 @@ function overviewPage(){
         <thead><tr><th>Product</th><th class="num">Units sold</th><th class="num">Revenue</th><th class="num">Cost</th><th class="num">Profit</th></tr></thead>
         <tbody>
           ${perProduct.map(p=>`<tr>
-            <td>${p.name}</td><td class="num">${p.qty}</td><td class="num">${inr(p.revenue)}</td>
+            <td>${p.name}</td><td class="num">${formatAggregatedAmount(p)}</td><td class="num">${inr(p.revenue)}</td>
             <td class="num">${inr(p.cost)}</td>
             <td class="num" style="color:${p.profit>=0?'var(--sage-dark)':'var(--red)'};font-weight:600;">${inr(p.profit)}</td>
           </tr>`).join('')}
