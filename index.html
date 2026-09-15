@@ -328,8 +328,7 @@ const DEFAULT_SETTINGS = {
   rates: {
     manpower: 300,        // per hour
     packaging: 50,        // per piece
-    parchment: 10,        // per piece
-    transport: 10         // per km
+    parchment: 10         // per piece
   },
   defaultMargin: 30
 };
@@ -338,7 +337,6 @@ const OTHER_COST_DEFS = [
   { key:'manpower',    label:'Manpower',    unit:'hour' },
   { key:'packaging',   label:'Packaging',   unit:'piece' },
   { key:'parchment',   label:'Parchment paper', unit:'piece' },
-  { key:'transport',   label:'Transportation', unit:'km' },
 ];
 // Electricity cost per hour used is derived from wattage and the per-kWh rate,
 // not stored directly: (watts / 1000) x hours x cost-per-kWh = cost for that
@@ -459,7 +457,8 @@ function saleRevenue(s){
   return s.totalsPreComputed ? (s.price||0) : (s.qty||0)*(s.price||0);
 }
 function saleCost(s){
-  return s.totalsPreComputed ? (s.cost||0) : (s.qty||0)*(s.costPerUnit||0);
+  const baseCost = s.totalsPreComputed ? (s.cost||0) : (s.qty||0)*(s.costPerUnit||0);
+  return baseCost + (s.shippingFee||0);
 }
 function saleReferencePrice(s){
   if(s.totalsPreComputed) return s.suggestedPriceAtSale;
@@ -1137,6 +1136,7 @@ function salesPage(){
         <div class="field"><label id="sl-cost-label">Cost for this sale (₹, auto)</label><input id="sl-cost" disabled></div>
       </div>
       <div class="page-sub" id="sl-hint" style="margin-top:-6px;margin-bottom:14px;"></div>
+      <div class="field" style="max-width:240px;"><label>Shipping fee (₹, optional)</label><input type="number" step="any" id="sl-shipping" placeholder="0" value="${editingSale ? (editingSale.shippingFee||'') : ''}"></div>
       <div class="field-row3">
         <div class="field"><label>Payment method</label>
           <select id="sl-paymethod">
@@ -1466,6 +1466,7 @@ function attachSalesHandlers(){
     const qtyInput = document.getElementById('sl-qty');
     const qty = parseFloat(qtyInput.value)||0;
     const price = parseFloat(priceInput.value)||0;
+    const shippingFee = parseFloat(document.getElementById('sl-shipping').value)||0;
     let saleFields;
 
     if(isCustomMode()){
@@ -1483,6 +1484,7 @@ function attachSalesHandlers(){
         portionLabel: `${qty} ${unitWord}`,
         price,
         cost,                          // entered manually — nothing calculated for custom items
+        shippingFee,
         totalsPreComputed: true,
         payMethod: document.getElementById('sl-paymethod').value,
         payStatus: document.getElementById('sl-paystatus').value,
@@ -1507,6 +1509,7 @@ function attachSalesHandlers(){
         portionLabel,
         price,                          // total price actually charged for this sale
         cost: sc.cost,                  // ingredient cost scaled by qty + full other-costs, always automatic
+        shippingFee,
         suggestedPriceAtSale: sc.suggested,
         totalsPreComputed: true,
         payMethod: document.getElementById('sl-paymethod').value,
